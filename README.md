@@ -40,6 +40,9 @@ We now also include a [verifiers](https://github.com/PrimeIntellect-ai/verifiers
 > This repository contains inference code for RLMs with support for various sandbox environments. Open-source contributions are welcome. This repository is maintained by the authors of the paper from the MIT OASYS lab.
 
 ## Quick Setup
+
+For the opt-in supervised recursion experiment and its ordered OOLONG-Pairs 32K runs, see
+[Supervised OOLONG-Pairs pilot](docs/supervised-oolong.md).
 > [!NOTE]
 > `rlms` requires **Python 3.11 or later**.
 
