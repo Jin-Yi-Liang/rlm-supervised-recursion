@@ -61,6 +61,7 @@ local_variables={}
 repl=SimpleREPL(global_variables,local_variables)
 
 def call_llm(client,model,message,tools):
+    finish_reason=None
     full_content=""
     tool_calls={}
     response=client.chat.completions.create(model=model,messages=message,tools=tools,stream=True)
@@ -69,9 +70,8 @@ def call_llm(client,model,message,tools):
             continue
         delta=chunk.choices[0].delta
         if delta.content is not None:
-            content=chunk.choices[0].delta.content
-            full_content+=content
-            print(content,end="",flush=True)
+            full_content+=delta.content
+            print(delta.content,end="",flush=True)
         if delta.tool_calls:
             for tool in delta.tool_calls or []:
                 index = tool.index
@@ -92,13 +92,18 @@ def call_llm(client,model,message,tools):
                         current_tool_call["function"]["name"]+=tool.function.name
                     if tool.function.arguments:
                         current_tool_call["function"]["arguments"]+=tool.function.arguments
-    results=do_repl(tool_calls)
-    return full_content,tool_calls,results
+        finish_reason=chunk.choices[0].finish_reason
+        if finish_reason is not None:
+            print(f"Finish reason:{finish_reason}")
+    return full_content,tool_calls,finish_reason
 
 def do_repl(tool_calls):
     results={}
     for call in tool_calls.values():
         if call["function"]["name"]!="execute_python":
+            results[call["id"]] = (
+                "Unknown tool: " + call["function"]["name"]
+            )
             print("unknown tool:",call["function"]["name"])
             continue
         try:
@@ -122,24 +127,72 @@ def do_repl(tool_calls):
         results[call["id"]]=result
     return results
 
-def stream_markdown(client,model,message):
+def agent_loop(client,model,messages,tools,max_step=8):
+    history=[]
+    for step in range(max_step):
+        print(f"====================step{step+1}====================")
+        content,tool_calls,finish_reason=call_llm(client,model,messages,tools)
+        if finish_reason=="length":
+            print("Model output chunked. Task not complete")
+        elif finish_reason=="tool_calls" and tool_calls:
+            results=do_repl(tool_calls)
+            calls=[
+                tool_calls[index]
+                for index in sorted(tool_calls)
+            ]
+            messages.append({
+                "role":"assistant",
+                "content":content,
+                "tool_calls":calls
+            })
+            for call in calls:
+                tool_id=call["id"]
+                result=results.get(tool_id,"Tool execution failed or return no result")
+                messages.append({
+                    "role":"tool",
+                    "tool_call_id":tool_id,
+                    "content":str(result)
+                })
+        else:
+            messages.append({
+                "role":"assistant",
+                "content":content,
+            })
+            break
+        history.append({
+            "finish_reason":finish_reason,
+            "content":content,
+            "tool_calls":tool_calls,
+            "result":results,
+            "global_variables":repl.get_pure_global_variables(),
+            "local_variables":repl.get_local_variables()
+        })
+    print("Agent loop finished")
+    return history,messages
+
+def stream_markdown(content,tool_calls,results):
     console = Console()
-    response=client.chat.completions.create(model=model,messages=message,stream=True)
-    full_content=""
     with Live(
         Markdown(""),
         console=console,
         refresh_per_second=1,
     )as live:
-        for chunk in response:
-            if not chunk.choices:
-                continue
-            content=chunk.choices[0].delta.content
-            if content:
-                full_content+=content
-                live.update(Markdown(full_content))
-    return full_content
+        live.update(Markdown(content,tool_calls,results))
 
-content,tool_calls,results=call_llm(client,model,messages,tools)
-print(content,tool_calls,results)
-repl.show_variables()
+if __name__ == "__main__":
+    while True:
+        user_input=input(">>").strip().lower()
+        if user_input in ["exit","quit"]:
+            break
+        if not user_input:
+            continue
+        messages.append({
+            "role":"user",
+            "content":user_input
+        })
+        history,messages=agent_loop(client,model,messages,tools)
+
+        print("=======================================================")
+        print(history)
+        print(messages)
+    print("Bye!")
