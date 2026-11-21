@@ -18,6 +18,19 @@ class SimpleREPL:
             exec(code,self.global_variables,self.local_variables)
         return output.getvalue()
 
+    def show_variables(self):
+        print("global_variables:")
+        print({
+            k: v
+            for k, v in self.global_variables.items()
+            if k != "__builtins__"
+        })
+        print("local_variables:")
+        print({
+            k:v
+            for k,v in self.local_variables.items()
+        })
+
 if __name__=="__main__":
     global_variables={}
     local_variables={}
@@ -31,10 +44,4 @@ if __name__=="__main__":
             print(result)
         except Exception as e:
             print(f"error: {e}")
-    print("global_variables:")
-    print({
-        k:v
-        for k,v in global_variables.items()
-        if k!="__builtins__"
-    })
-    print(f"local_variables:{local_variables}")
+    repl.show_variables()
