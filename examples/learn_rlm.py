@@ -1,32 +1,40 @@
+import io
+from contextlib import redirect_stdout
+
 class SimpleREPL:
-    def __init__(self):
-        self.variables={}
+    def __init__(self,global_vari,local_vari):
+        self.global_variables=global_vari
+        self.local_variables=local_vari
 
     def set_variable(self,name,value):
-        self.variables[name]=value
+        self.global_variables[name]=value
 
     def get_variable(self,name):
-        return self.variables[name]
+        return self.global_variables[name]
 
     def execute(self,code):
-        exec(code,self.variables,self.variables)
+        output=io.StringIO()
+        with redirect_stdout(output):
+            exec(code,self.global_variables,self.local_variables)
+        return output.getvalue()
 
 if __name__=="__main__":
-    repl=SimpleREPL()
-    repl.set_variable("context","This is my full context variable that contains all the external context of your context")
-    context=repl.get_variable("context")
-    print(f"context:{context}")
-
-    repl.execute("""
-a_num=10
-b_num=20
-total=a_num+b_num
-    """)
-    total1=repl.get_variable("total")
-    repl.execute("total+=a_num")
-    total2=repl.get_variable("total")
-    print(f"total1:{total1}\ntotal2:{total2}")
-
-    for key,value in repl.variables.items():
-        if key !=  "__builtins__":
-            print(f"{key}:{value}")
+    global_variables={}
+    local_variables={}
+    repl=SimpleREPL(global_variables,local_variables)
+    while True:
+        code=input(">>")
+        if code=="exit":
+            break
+        try:
+            result=repl.execute(code)
+            print(result)
+        except Exception as e:
+            print(f"error: {e}")
+    print("global_variables:")
+    print({
+        k:v
+        for k,v in global_variables.items()
+        if k!="__builtins__"
+    })
+    print(f"local_variables:{local_variables}")
