@@ -25,13 +25,14 @@ class SimpleREPL:
         return self.local_variables
 
     def execute(self,code):
+        result=""
         output=io.StringIO()
         with redirect_stdout(output):
             try:
                 exec(code,self.global_variables,self.local_variables)
                 result=output.getvalue()
             except Exception as e:
-                result=f"error:{e}"
+                result+=f"error:{e}"
         return result
 
     def show_variables(self):

@@ -51,11 +51,13 @@ messages = [
     {
         "role": "user",
         "content": (
-            "List the files in /home/michael/workspace/research/RLM/rlm-supervised-recursion/supervised_rlm "
-            "using the Python REPL and store all files name in 'file_name' variable"
+            "List the files in /home/michael/workspace/research/rlm-supervised-recursion/supervised_rlm"
+            "using the Python REPL and store all files name in 'file_name' variable and print all file names "
+            "in stand output"
         )
     }
 ]
+history=[]
 global_variables={}
 local_variables={}
 repl=SimpleREPL(global_variables,local_variables)
@@ -92,12 +94,12 @@ def call_llm(client,model,message,tools):
                         current_tool_call["function"]["name"]+=tool.function.name
                     if tool.function.arguments:
                         current_tool_call["function"]["arguments"]+=tool.function.arguments
-        finish_reason=chunk.choices[0].finish_reason
-        if finish_reason is not None:
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason=chunk.choices[0].finish_reason
             print(f"Finish reason:{finish_reason}")
     return full_content,tool_calls,finish_reason
 
-def do_repl(tool_calls):
+def do_repl(tool_calls,repl,require_approval=True):
     results={}
     for call in tool_calls.values():
         if call["function"]["name"]!="execute_python":
@@ -109,10 +111,16 @@ def do_repl(tool_calls):
         try:
             arguments=json.loads(call["function"]["arguments"])
             code=arguments["code"]
+            if not isinstance(code,str):
+                raise TypeError("code must be a string")
             print(f"Code will be execute:\n{code}")
             user_decision=""
+            result=""
             while user_decision not in ["y","n"]:
-                user_decision=input("Do tool call[y/n]?").strip().lower()
+                if not require_approval:
+                    user_decision = "y"
+                else:
+                    user_decision=input("Do tool call[y/n]?").strip().lower()
                 if user_decision=="n":
                     result="Execution denied by user"
                 elif user_decision=="y":
@@ -127,15 +135,14 @@ def do_repl(tool_calls):
         results[call["id"]]=result
     return results
 
-def agent_loop(client,model,messages,tools,max_step=8):
-    history=[]
+def agent_loop(client,model,messages,tools,repl,history,max_step=8):
     for step in range(max_step):
         print(f"====================step{step+1}====================")
         content,tool_calls,finish_reason=call_llm(client,model,messages,tools)
         if finish_reason=="length":
             print("Model output chunked. Task not complete")
         elif finish_reason=="tool_calls" and tool_calls:
-            results=do_repl(tool_calls)
+            results=do_repl(tool_calls,repl)
             calls=[
                 tool_calls[index]
                 for index in sorted(tool_calls)
@@ -160,6 +167,7 @@ def agent_loop(client,model,messages,tools,max_step=8):
             })
             break
         history.append({
+            "step":step+1,
             "finish_reason":finish_reason,
             "content":content,
             "tool_calls":tool_calls,
@@ -168,21 +176,16 @@ def agent_loop(client,model,messages,tools,max_step=8):
             "local_variables":repl.get_local_variables()
         })
     print("Agent loop finished")
-    return history,messages
 
-def stream_markdown(content,tool_calls,results):
-    console = Console()
-    with Live(
-        Markdown(""),
-        console=console,
-        refresh_per_second=1,
-    )as live:
-        live.update(Markdown(content,tool_calls,results))
+def render_markdown(content:str):
+    console=Console()
+    markdown=Markdown(content)
+    console.print(markdown)
 
 if __name__ == "__main__":
     while True:
-        user_input=input(">>").strip().lower()
-        if user_input in ["exit","quit"]:
+        user_input=input(">>")
+        if user_input.strip().lower() in ["exit","quit"]:
             break
         if not user_input:
             continue
@@ -190,9 +193,10 @@ if __name__ == "__main__":
             "role":"user",
             "content":user_input
         })
-        history,messages=agent_loop(client,model,messages,tools)
-
-        print("=======================================================")
-        print(history)
-        print(messages)
+        agent_loop(client,model,messages,tools,repl,history,max_step=8)
     print("Bye!")
+
+    print("=======================================================")
+    render_markdown(str(history))
+    render_markdown(str(messages))
+    repl.show_variables()
