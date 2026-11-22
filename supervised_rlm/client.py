@@ -3,7 +3,6 @@ from openai import OpenAI
 import json
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.live import Live
 
 from supervised_rlm.repl import SimpleREPL
 
@@ -61,6 +60,9 @@ history=[]
 global_variables={}
 local_variables={}
 repl=SimpleREPL(global_variables,local_variables)
+
+max_step=10
+require_approval=True
 
 def call_llm(client,model,message,tools):
     finish_reason=None
@@ -135,14 +137,17 @@ def do_repl(tool_calls,repl,require_approval=True):
         results[call["id"]]=result
     return results
 
-def agent_loop(client,model,messages,tools,repl,history,max_step=8):
+def agent_loop(client,model,messages,tools,repl,history,max_step=8,require_approval=True):
+    print(f"Model:{model}")
+    print(f"Max_steps:{max_step}")
+    print(f"require_approval:{require_approval}")
     for step in range(max_step):
         print(f"====================step{step+1}====================")
         content,tool_calls,finish_reason=call_llm(client,model,messages,tools)
         if finish_reason=="length":
             print("Model output chunked. Task not complete")
         elif finish_reason=="tool_calls" and tool_calls:
-            results=do_repl(tool_calls,repl)
+            results=do_repl(tool_calls,repl,require_approval)
             calls=[
                 tool_calls[index]
                 for index in sorted(tool_calls)
@@ -193,7 +198,7 @@ if __name__ == "__main__":
             "role":"user",
             "content":user_input
         })
-        agent_loop(client,model,messages,tools,repl,history,max_step=8)
+        agent_loop(client,model,messages,tools,repl,history,max_step=20,require_approval=False)
     print("Bye!")
 
     print("=======================================================")
