@@ -3,14 +3,30 @@ from openai import OpenAI
 import json
 from rich.console import Console
 from rich.markdown import Markdown
+import sys
+from copy import deepcopy
 
 from supervised_rlm.repl import SimpleREPL
+from supervised_rlm.subagent import SubAgentDispatcher
 
-base_url=os.environ.get("LLM_URL") or "http://10.100.1.114:8001/v1"
-api_key=os.environ.get("LLM_API_KEY") or "NO_API_KEY"
-model=os.environ.get("MODEL") or "Qwen/Qwen3-32B"
+models={
+    "qwen3-32B":{
+        "base_url":"http://10.100.1.114:8001/v1",
+        "api_key":"NO_API_KEY",
+        "model":"Qwen/Qwen3-32B"
+    },
+    "qwen3.5-9B":{
+        "base_url":"http://10.100.1.114:8000/v1",
+        "api_key":"NO_API_KEY",
+        "model":"Qwen/Qwen3.5-9B"
+    },
+    "deepseek-v4.1":{
+        "base_url":"https://api.deepseek.com",
+        "api_key":os.environ.get("LLM_API_KEY"),
+        "model":"https://api.deepseek.com"
+    }
+}
 
-client=OpenAI(base_url=base_url,api_key=api_key,timeout=60,max_retries=3)
 tools = [
     {
         "type": "function",
@@ -34,37 +50,20 @@ tools = [
         }
     }
 ]
-messages = [
-    {
-        "role": "system",
-        "content": (
-            "You are a Python coding assistant. "
-            "You can call execute_python to run Python code. "
-            "The REPL preserves variables across calls. "
-            "Use print() to inspect results. "
-            "For this task, perform read-only filesystem operations. "
-            "Do not modify or delete files. "
-            "When the task is complete, provide a final answer."
-        )
-    },
-    {
-        "role": "user",
-        "content": (
-            "List the files in /home/michael/workspace/research/rlm-supervised-recursion/supervised_rlm"
-            "using the Python REPL and store all files name in 'file_name' variable and print all file names "
-            "in stand output"
-        )
-    }
-]
-history=[]
-global_variables={}
-local_variables={}
-repl=SimpleREPL(global_variables,local_variables)
 
-max_step=10
-require_approval=True
+def _terminal_print(content):
+    stream=sys.__stdout__ or sys.stdout
+    stream.write(content)
+    stream.flush()
 
-def call_llm(client,model,message,tools):
+def _extract_final_answer(content):
+    if "<think>" in content:
+        if "</think>" not in content:
+            return ""
+        return content.rsplit("</think>",1)[1].strip()
+    return content.strip()
+
+def call_llm(client,model,message,tools,show_stream=True):
     finish_reason=None
     full_content=""
     tool_calls={}
@@ -73,9 +72,10 @@ def call_llm(client,model,message,tools):
         if not chunk.choices:
             continue
         delta=chunk.choices[0].delta
-        if delta.content is not None:
+        if delta.content:
             full_content+=delta.content
-            print(delta.content,end="",flush=True)
+            if show_stream:
+                _terminal_print(delta.content)
         if delta.tool_calls:
             for tool in delta.tool_calls or []:
                 index = tool.index
@@ -98,10 +98,11 @@ def call_llm(client,model,message,tools):
                         current_tool_call["function"]["arguments"]+=tool.function.arguments
         if chunk.choices[0].finish_reason is not None:
             finish_reason=chunk.choices[0].finish_reason
-            print(f"Finish reason:{finish_reason}")
+    if show_stream:
+        _terminal_print(f"Finish reason:{finish_reason}\n")
     return full_content,tool_calls,finish_reason
 
-def do_repl(tool_calls,repl,require_approval=True):
+def do_repl(tool_calls,repl,require_approval=True,show_log=True):
     results={}
     for call in tool_calls.values():
         if call["function"]["name"]!="execute_python":
@@ -115,7 +116,8 @@ def do_repl(tool_calls,repl,require_approval=True):
             code=arguments["code"]
             if not isinstance(code,str):
                 raise TypeError("code must be a string")
-            print(f"Code will be execute:\n{code}")
+            if show_log:
+                _terminal_print(f"Code will be execute:\n{code}\n")
             user_decision=""
             result=""
             while user_decision not in ["y","n"]:
@@ -133,30 +135,56 @@ def do_repl(tool_calls,repl,require_approval=True):
                     continue
         except Exception as e:
             result=f"{type(e).__name__}:{e}"
-        print(f"REPL's output:\n{result}")
+        if show_log:
+            _terminal_print(f"REPL's output:\n{result}\n")
         results[call["id"]]=result
     return results
 
-def agent_loop(client,model,messages,tools,repl,history,max_step=8,require_approval=True):
-    print(f"Model:{model}")
-    print(f"Max_steps:{max_step}")
-    print(f"require_approval:{require_approval}")
-    for step in range(max_step):
-        print(f"====================step{step+1}====================")
-        content,tool_calls,finish_reason=call_llm(client,model,messages,tools)
-        if finish_reason=="length":
-            print("Model output chunked. Task not complete")
-        elif finish_reason=="tool_calls" and tool_calls:
-            results=do_repl(tool_calls,repl,require_approval)
-            calls=[
-                tool_calls[index]
-                for index in sorted(tool_calls)
-            ]
+def agent_loop(client,model,messages,tools,repl,history,
+               max_step=8,require_approval=True,show_stream=True,role="root"):
+    if show_stream==True and role=="root":
+        print(f"Model:{model}")
+        print(f"Max_steps:{max_step}")
+        print(f"require_approval:{require_approval}")
+    for step in range(1,max_step+1):
+        if show_stream==True and role=="root":
+            print(f"==================== step{step} ====================")
+        content,tool_calls,finish_reason=call_llm(client,model,messages,tools,show_stream=show_stream)
+        calls = [
+            tool_calls[index]
+            for index in sorted(tool_calls)
+        ]
+        entry={
+            "role":role,
+            "step":step,
+            "finish_reason":finish_reason,
+            "content":content,
+            "tool_calls":deepcopy(calls),
+            "results":{},
+            "repl_state":repl.snapshot_variables(),
+            "status":"unknown"
+        }
+        if finish_reason in ("length","content_filter"):
+            entry["status"]="incomplete"
+            history.append(entry)
+            return {
+                "status":"incomplete",
+                "reason":finish_reason
+            }
+        if finish_reason=="tool_calls":
+            if not tool_calls:
+                entry["status"]="protocol_error"
+                history.append(entry)
+                return {
+                    "status":"protocol_error",
+                    "reason":"finish_reason is tool_call but calls is empty"
+                }
             messages.append({
                 "role":"assistant",
-                "content":content,
+                "content":content or None,
                 "tool_calls":calls
             })
+            results=do_repl(tool_calls,repl,require_approval=require_approval,show_log=show_stream)
             for call in calls:
                 tool_id=call["id"]
                 result=results.get(tool_id,"Tool execution failed or return no result")
@@ -165,43 +193,110 @@ def agent_loop(client,model,messages,tools,repl,history,max_step=8,require_appro
                     "tool_call_id":tool_id,
                     "content":str(result)
                 })
+            entry["status"]="tool_executed"
+            entry["results"]=dict(results)
+            entry["repl_state"]=repl.snapshot_variables()
+            history.append(entry)
+            continue
+        if finish_reason=="stop" and not tool_calls:
+            answer=_extract_final_answer(content)
+            if answer:
+                messages.append({
+                    "role":"assistant",
+                    "content":content,
+                })
+                entry["status"]="completed"
+                history.append(entry)
+                return {
+                    "status":"completed",
+                    "answer":answer
+                }
+            else:
+                entry["status"]="incomplete"
+                history.append(entry)
+                return {
+                    "status":"incomplete",
+                    "reason":"no final answer can be extracted"
+                }
         else:
-            messages.append({
-                "role":"assistant",
-                "content":content,
-            })
-            break
-        history.append({
-            "step":step+1,
-            "finish_reason":finish_reason,
-            "content":content,
-            "tool_calls":tool_calls,
-            "result":results,
-            "global_variables":repl.get_pure_global_variables(),
-            "local_variables":repl.get_local_variables()
-        })
-    print("Agent loop finished")
+            entry["status"]="protocol_error"
+            history.append(entry)
+            return {
+                "status":"protocol_error",
+                "reason":(
+                    f"unexpected finish reason:{finish_reason},"
+                    f"tool_calls={len(calls)}"
+                )
+            }
+    return {
+        "status":"max_step",
+        "reason":f"Task reached max model turn:{max_step}"
+    }
 
-def render_markdown(content:str):
+def main():
+    model_config=models["qwen3-32B"]
+    base_url=model_config["base_url"]
+    api_key=model_config["api_key"]
+    model=model_config["model"]
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=60, max_retries=3)
+    root_variables={
+        "context":[
+            "i am a student in CS",
+            "i am doing research on RLM Paper's optimized",
+            "My work folder is /home/michael/workspace/research/rlm-supervised-recursion/supervised_rlm",
+            "list all files in that Path into standard output, and store them into global variables:file_names"
+        ]
+    }
+    root_repl=SimpleREPL(root_variables,root_variables)
+    dispatcher=SubAgentDispatcher(client,model,tools,agent_loop,max_subcalls=4,max_content_chars=200_000,required_approval=False)
+    root_repl.set_global_variable("rlm_query",dispatcher.rlm_query)
+    root_repl.set_global_variable("rlm_query_batched",dispatcher.rlm_query_batch)
+    system_prompt = (
+        "You are a Root Agent with a persistent Python REPL. "
+        "The REPL contains a variable named context, "
+        "holding external task data. "
+        "Use execute_python to inspect and process it. "
+        "Two Python functions are available inside the REPL: "
+        "rlm_query(instruction, context) creates an independent "
+        "Child Agent and returns its final answer. "
+        "rlm_query_batched(queries) sequentially executes "
+        "multiple child tasks, where queries is a list of "
+        "(instruction, context) pairs. "
+        "Each Child Agent has its own messages and REPL. "
+        "Delegate independent subtasks when appropriate. "
+        "Pass only relevant context to children. "
+        "Use Python to aggregate child results. "
+        "When the overall task is complete, provide a final "
+        "answer directly without calling tools. "
+        "Do not claim success without sufficient evidence."
+    )
+    messages=[
+        {
+            "role":"system",
+            "content":system_prompt
+        }
+    ]
+    history=[]
     console=Console()
-    markdown=Markdown(content)
-    console.print(markdown)
+    while True:
+        user_input=input(">>").strip()
+        if user_input.lower() in ["exit","quit"]:
+            break
+        else:
+            dispatcher.reset_task()
+            messages.append({
+                "role":"user",
+                "content":user_input
+            })
+            outcome=agent_loop(client,model,messages,tools,root_repl,history,max_step=20,require_approval=False,show_stream=True,role="root")
+            _terminal_print(f"Task status:{outcome['status']}\n")
+            _terminal_print(f"Total child calls:{len(dispatcher.records)}\n")
+            if outcome["status"]=="completed":
+                console.print(Markdown(outcome["answer"]))
+            else:
+                _terminal_print(f"Reason:{outcome['reason']}\n")
+    _terminal_print("Agent session finished\n")
+
 
 if __name__ == "__main__":
-    while True:
-        user_input=input(">>")
-        if user_input.strip().lower() in ["exit","quit"]:
-            break
-        if not user_input:
-            continue
-        messages.append({
-            "role":"user",
-            "content":user_input
-        })
-        agent_loop(client,model,messages,tools,repl,history,max_step=20,require_approval=False)
-    print("Bye!")
-
-    print("=======================================================")
-    render_markdown(str(history))
-    render_markdown(str(messages))
-    repl.show_variables()
+    main()

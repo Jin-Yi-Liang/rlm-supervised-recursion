@@ -2,7 +2,11 @@ import io
 from contextlib import redirect_stdout
 
 class SimpleREPL:
-    def __init__(self,global_vari,local_vari):
+    def __init__(self,global_vari=None,local_vari=None):
+        if global_vari is None:
+            global_vari={}
+        if local_vari is None:
+            local_vari=global_vari
         self.global_variables=global_vari
         self.local_variables=local_vari
 
@@ -35,27 +39,28 @@ class SimpleREPL:
                 result+=f"error:{e}"
         return result
 
-    def show_variables(self):
-        print("global_variables:")
-        print({
-            k: v
-            for k, v in self.global_variables.items()
-            if k != "__builtins__"
-        })
-        print("local_variables:")
-        print({
-            k:v
-            for k,v in self.local_variables.items()
-        })
+    def snapshot_variables(self):
+        def summarize(namespace):
+            items={}
+            for name,value in namespace.items():
+                if name=="__builtins__":
+                    continue
+                item={
+                    "type":type(value).__name__
+                }
+                if isinstance(value,(str,int,float,bool,type(None))):
+                    item["preview"]=repr(value)[:200]
+                elif isinstance(value,(list,tuple,dict,set)):
+                    item["length"]=len(value)
+                items[name]=item
+            return items
+        return {
+            "global":summarize(self.global_variables),
+            "local":summarize(self.local_variables),
+        }
 
-    def get_pure_global_variables(self):
-        pure_global_variables=[]
-        pure_global_variables.append({
-            k: v
-            for k, v in self.global_variables.items()
-            if k != "__builtins__"
-        })
-        return pure_global_variables
+    def show_variables(self):
+        print(self.snapshot_variables())
 
 if __name__=="__main__":
     global_variables={}
