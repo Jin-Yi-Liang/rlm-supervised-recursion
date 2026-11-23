@@ -31,6 +31,8 @@ class REPLRuntime:
         tools: dict[str, Callable],
         metrics: MetricsCollector,
         timeout: float,
+        *,
+        context_ref: str | None = None,
     ):
         self.role = role
         self.task_id = task_id
@@ -53,7 +55,10 @@ class REPLRuntime:
         try:
             if self.receive(monotonic() + timeout) != {"kind": "ready"}:
                 raise REPLError("Restricted Python worker did not initialize")
-            self.send({"context": context, "tools": list(tools)}, monotonic() + timeout)
+            self.send(
+                {"context": context, "context_ref": context_ref, "tools": list(tools)},
+                monotonic() + timeout,
+            )
         except BaseException:
             self.close()
             raise
@@ -117,10 +122,20 @@ class REPLRuntime:
         try:
             if tool is None:
                 raise ContractError(error_code, f"Invalid call to {name!r}")
+            signature = inspect.signature(tool)
             try:
-                inspect.signature(tool).bind(*args, **kwargs)
+                signature.bind(*args, **kwargs)
             except TypeError as error:
-                raise ContractError("INVALID_ARGUMENT", str(error)) from error
+                call_shape = signature.replace(
+                    parameters=[
+                        parameter.replace(annotation=inspect.Parameter.empty)
+                        for parameter in signature.parameters.values()
+                    ],
+                    return_annotation=inspect.Signature.empty,
+                )
+                raise ContractError(
+                    "INVALID_ARGUMENT", f"{error}. Use {name}{call_shape}"
+                ) from error
             valid = executed = True
             result = tool(*args, **kwargs)
             success, error_code = True, None

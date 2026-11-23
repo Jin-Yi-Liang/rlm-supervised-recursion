@@ -78,7 +78,11 @@ class PlanManager:
 
     def draft(self, draft_id: str) -> PlanDraft:
         if not isinstance(draft_id, str) or draft_id not in self.drafts:
-            raise ContractError("PLAN_NOT_FOUND", "Unknown plan draft")
+            raise ContractError(
+                "PLAN_NOT_FOUND",
+                "The draft must be the ID returned by create_plan or begin_plan_revision. "
+                "A committed draft cannot be reused.",
+            )
         return self.drafts[draft_id]
 
     def copy_plan(self, draft_id: str, goal: str | None = None) -> str:

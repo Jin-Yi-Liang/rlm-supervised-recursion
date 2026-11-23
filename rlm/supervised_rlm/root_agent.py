@@ -25,6 +25,12 @@ class RootAgent:
         self.task = plan.task
 
     def store_input(self, value: object, name: str = "input") -> str:
+        if isinstance(value, str) and value in self.plan.artifacts.refs:
+            raise ContractError(
+                "INVALID_ARGUMENT",
+                "That value is already an artifact handle. Pass the input_ref to add_task or "
+                "update_task, or pass the actual data in context to store_input.",
+            )
         return self.plan.artifacts.freeze(value, text(name, "name", 120), "root").ref_id
 
     def store_final(self, value: str) -> str:
@@ -186,6 +192,7 @@ class RootAgent:
                 tools,
                 self.loop.metrics,
                 self.loop.config.execution_timeout,
+                context_ref=ref.ref_id,
             ) as repl:
                 for step in range(1, self.loop.config.max_root_steps + 1):
                     outcome = self.loop.turn(session, repl, step, lambda: False, finish_cell)

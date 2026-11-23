@@ -306,3 +306,62 @@ def test_global_budget_produces_incomplete_metrics(tmp_path):
     outcome = runtime.solve("Add 4 and 2", [4, 2], RunConfig(max_model_calls=1))
     assert outcome.status == "INCOMPLETE"
     assert runtime.get_run_state(outcome.run_id)["metrics"].llm_calls == 1
+
+
+def test_plan_issue_returns_to_root_and_revision_binds_original_input(tmp_path):
+    model = ScriptedModel(
+        {
+            ("ROOT", "root", None): [
+                """
+assert context == "original"
+try:
+    store_input(context_ref)
+except ValueError as error:
+    assert "already an artifact handle" in str(error)
+else:
+    raise AssertionError("An artifact handle must not be wrapped as data")
+draft = create_plan("Inspect the original input")
+add_task(draft, "read", "Return the complete original text", store_input("wrong"), "complete input")
+set_task_acceptance(draft, "read", ["Return the original text"], "string")
+commit_plan(draft)
+print(rlm_query_batched(["read"]))
+""",
+                """
+state = get_plan_state()
+assert state.tasks[0].status == "PLAN_ISSUE"
+revision = begin_plan_revision(state.plan_version, "Use the authoritative original data")
+update_task(revision, "read", input_ref=context_ref)
+assert commit_plan(revision).plan_version == 2
+receipt = rlm_query("read")
+submit_root_answer(final_text=read_accepted_result(receipt.receipt_id).value)
+""",
+            ],
+            ("CHILD", "read", None): [
+                'result = context\nsubmit_candidate("result")',
+                'result = context\nsubmit_candidate("result")',
+            ],
+            ("SUPERVISOR", "read", 1): [
+                """
+source = read_task_input()
+assert source.value == "wrong"
+submit_review("read", 1, "PLAN_ISSUE", "Wrong assigned input", [source.evidence_ref],
+              "Use the original text reference")
+""",
+            ],
+            ("SUPERVISOR", "read", 2): [
+                """
+source = read_task_input()
+result = inspect_child_variable("result")
+assert source.value == result.value == "original"
+submit_review("read", 2, "ACCEPT", "Original text verified", [source.evidence_ref, result.evidence_ref])
+""",
+            ],
+        }
+    )
+    run = SessionRuntime(model, tmp_path)
+    outcome = run.solve("Return the text of the original input", "original")
+    assert outcome.status == "COMPLETED"
+    assert outcome.final_text == "original"
+    assert run.plan.spec("read").task_version == 2
+    assert run.gate.list_accepted_results()[0].candidate_version == 2
+    assert run.get_run_state(outcome.run_id)["metrics"].plan_issues == 1

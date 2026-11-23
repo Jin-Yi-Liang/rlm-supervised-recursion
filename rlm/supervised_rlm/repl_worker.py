@@ -209,6 +209,8 @@ def main():
         allowed.pop(name, None)
     allowed["__import__"] = import_module
     protected.update(context=config["context"], __builtins__=allowed)
+    if config["context_ref"] is not None:
+        protected["context_ref"] = config["context_ref"]
     namespace = protected.copy()
     while (message := receive()) is not None:
         out, err = BoundedOutput(), BoundedOutput()
