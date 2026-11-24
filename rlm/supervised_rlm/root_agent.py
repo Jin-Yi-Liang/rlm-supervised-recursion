@@ -192,6 +192,7 @@ class RootAgent:
                 tools,
                 self.loop.metrics,
                 self.loop.config.execution_timeout,
+                max_tool_calls=self.loop.config.max_cell_tool_calls,
                 context_ref=ref.ref_id,
             ) as repl:
                 for step in range(1, self.loop.config.max_root_steps + 1):

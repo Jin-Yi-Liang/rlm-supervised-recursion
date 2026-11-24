@@ -33,12 +33,14 @@ class REPLRuntime:
         timeout: float,
         *,
         context_ref: str | None = None,
+        max_tool_calls: int = 1024,
     ):
         self.role = role
         self.task_id = task_id
         self.metrics = metrics
         self.tools = tools
         self.timeout = timeout
+        self.max_tool_calls = max_tool_calls
         self.buffer = bytearray()
         self.process = subprocess.Popen(
             [sys.executable, "-I", "-S", "-u", str(Path(__file__).with_name("repl_worker.py"))],
@@ -169,12 +171,22 @@ class REPLRuntime:
         tools = {**self.tools, "has_pending_candidate": pending}
         deadline = monotonic() + self.timeout
         self.send({"code": code, "execution_id": execution_id}, deadline)
+        calls = 0
         while True:
             packet = self.receive(deadline)
             if packet.get("kind") == "tool":
+                name = packet.get("tool")
+                if name != "has_pending_candidate":
+                    calls += 1
+                    if calls > self.max_tool_calls:
+                        raise REPLError(
+                            f"Python cell exceeded its {self.max_tool_calls} tool calls"
+                        )
                 start = monotonic()
                 reply = self.call_tool(packet, tools)
-                deadline += monotonic() - start
+                if name in ("rlm_query", "rlm_query_batched") and name in self.tools:
+                    # Delegated model calls have their own runtime budgets.
+                    deadline += monotonic() - start
                 self.send(reply, deadline)
                 continue
             if packet.get("kind") != "execution" or packet.get("execution_id") != execution_id:

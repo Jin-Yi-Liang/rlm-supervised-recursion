@@ -150,6 +150,7 @@ class SubAgentDispatcher:
                 {"submit_candidate": submit_candidate},
                 self.loop.metrics,
                 self.loop.config.execution_timeout,
+                max_tool_calls=self.loop.config.max_cell_tool_calls,
             ) as repl:
                 for step in range(1, self.loop.config.max_child_steps + 1):
                     if repair is not None:

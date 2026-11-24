@@ -11,7 +11,7 @@ revision, and REVIEW_INCOMPLETE leaves the task unaccepted.
 
 Use a Linux host or Pod with `libseccomp.so.2` and Python 3.11+. The opt-in runtime gives
 each role a persistent Python subprocess with an allowlisted syscall filter, separate input
-and namespace, bounded execution time, and role-specific JSON tools. Supported artifact
+and namespace, bounded execution time, a per-cell tool call limit, and role-specific JSON tools. Supported artifact
 values are JSON-compatible. Worker modules are preloaded from the Python standard library.
 
 ```bash

@@ -365,3 +365,23 @@ submit_review("read", 2, "ACCEPT", "Original text verified", [source.evidence_re
     assert run.plan.spec("read").task_version == 2
     assert run.gate.list_accepted_results()[0].candidate_version == 2
     assert run.get_run_state(outcome.run_id)["metrics"].plan_issues == 1
+
+
+def test_repl_stops_a_cell_that_repeatedly_calls_host_tools(tmp_path):
+    from rlm.supervised_rlm.repl import REPLError
+
+    metrics = MetricsCollector(tmp_path, "run")
+    with (
+        REPLRuntime(
+            AgentRole.ROOT,
+            "root",
+            [],
+            {"pending": lambda: [1]},
+            metrics,
+            5,
+            max_tool_calls=4,
+        ) as repl,
+        pytest.raises(REPLError, match="exceeded its 4 tool calls"),
+    ):
+        repl.execute("while pending():\n    pass", "loop", lambda: False)
+    assert sum(record.tool_name == "pending" for record in metrics.tools) == 4

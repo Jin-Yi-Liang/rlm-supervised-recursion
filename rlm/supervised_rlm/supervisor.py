@@ -98,6 +98,7 @@ class SupervisorAgent:
                 tools,
                 self.loop.metrics,
                 self.loop.config.execution_timeout,
+                max_tool_calls=self.loop.config.max_cell_tool_calls,
             ) as repl:
                 for step in range(1, self.loop.config.max_review_steps + 1):
                     verdict = self.loop.turn(session, repl, step, lambda: False, finish_cell)

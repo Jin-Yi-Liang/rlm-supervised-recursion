@@ -84,6 +84,7 @@ class RunConfig:
     max_revisions: int = 2
     max_tasks: int = 64
     max_model_calls: int = 480
+    max_cell_tool_calls: int = 1024
     max_tokens: int = 2_000_000
     context_window: int = 32768
     max_output_tokens: int = 4096
@@ -98,6 +99,7 @@ class RunConfig:
             "max_review_steps",
             "max_tasks",
             "max_model_calls",
+            "max_cell_tool_calls",
             "max_tokens",
             "context_window",
             "max_output_tokens",
