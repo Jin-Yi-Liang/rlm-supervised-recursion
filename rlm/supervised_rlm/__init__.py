@@ -1,4 +1,4 @@
-"""Supervised recursive RLM with versioned plans and independently audited receipts."""
+"""Planning-only RLM with versioned plans and structured task receipts."""
 
 from rlm.supervised_rlm.client import QwenClient
 from rlm.supervised_rlm.runtime import SessionRuntime

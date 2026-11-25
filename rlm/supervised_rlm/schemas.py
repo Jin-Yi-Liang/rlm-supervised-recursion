@@ -1,4 +1,4 @@
-"""Typed contracts owned by the supervised runtime."""
+"""Typed contracts owned by the planning-only runtime."""
 
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -9,27 +9,15 @@ class TaskStatus(StrEnum):
     PLANNED = "PLANNED"
     RUNNING = "RUNNING"
     SUBMITTED = "SUBMITTED"
-    REVIEWING = "REVIEWING"
-    REPAIRING = "REPAIRING"
     ACCEPTED = "ACCEPTED"
-    PLAN_ISSUE = "PLAN_ISSUE"
-    REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     SUPERSEDED = "SUPERSEDED"
 
 
-class ReviewDecision(StrEnum):
-    ACCEPT = "ACCEPT"
-    REVISE = "REVISE"
-    PLAN_ISSUE = "PLAN_ISSUE"
-    REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
-
-
 class AgentRole(StrEnum):
     ROOT = "ROOT"
     CHILD = "CHILD"
-    SUPERVISOR = "SUPERVISOR"
 
 
 class ErrorCode(StrEnum):
@@ -49,7 +37,6 @@ class ErrorCode(StrEnum):
     ARTIFACT_TOO_LARGE = "ARTIFACT_TOO_LARGE"
     UNSUPPORTED_ARTIFACT = "UNSUPPORTED_ARTIFACT"
     ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
-    MISSING_EVIDENCE = "MISSING_EVIDENCE"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     OUTPUT_SCHEMA_MISMATCH = "OUTPUT_SCHEMA_MISMATCH"
 
@@ -80,8 +67,6 @@ class BudgetExhausted(RuntimeError):
 class RunConfig:
     max_root_steps: int = 24
     max_child_steps: int = 20
-    max_review_steps: int = 10
-    max_revisions: int = 2
     max_tasks: int = 64
     max_model_calls: int = 480
     max_cell_tool_calls: int = 1024
@@ -96,7 +81,6 @@ class RunConfig:
         for name in (
             "max_root_steps",
             "max_child_steps",
-            "max_review_steps",
             "max_tasks",
             "max_model_calls",
             "max_cell_tool_calls",
@@ -107,8 +91,6 @@ class RunConfig:
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if type(self.max_revisions) is not int or self.max_revisions < 0:
-            raise ValueError("max_revisions must be a nonnegative integer")
         if not 0 < self.max_output_tokens < self.context_window or self.execution_timeout <= 0:
             raise ValueError("Invalid model context or execution limits")
 
@@ -208,7 +190,6 @@ class TaskRecord:
     status: TaskStatus = TaskStatus.PLANNED
     attempt_count: int = 0
     candidate_version: int = 0
-    latest_review_id: str | None = None
     accepted_receipt_id: str | None = None
     last_error: str | None = None
     required: bool = True
@@ -257,25 +238,6 @@ class ArtifactView:
 
 
 @dataclass(frozen=True)
-class VariableInfo:
-    name: str
-    type_name: str
-    size_bytes: int
-    available: bool
-    snapshot_id: str
-    evidence_ref: str | None
-
-
-@dataclass(frozen=True)
-class VariableCatalog:
-    entries: tuple[VariableInfo, ...]
-    snapshot_id: str
-
-    def names(self) -> tuple[str, ...]:
-        return tuple(item.name for item in self.entries)
-
-
-@dataclass(frozen=True)
 class SubmissionAck:
     status: str
     submission_id: str
@@ -294,35 +256,6 @@ class CandidateManifest:
     snapshot_id: str
     summary: str
     status: str
-    idempotency_key: str
-
-
-@dataclass(frozen=True)
-class ReviewScope:
-    run_id: str
-    task_id: str
-    candidate_version: int
-    supervisor_id: str
-    snapshot_id: str
-
-
-@dataclass(frozen=True)
-class ReviewVerdict:
-    review_id: str
-    run_id: str
-    task_id: str
-    candidate_version: int
-    decision: ReviewDecision
-    finding: str
-    evidence_refs: tuple[str, ...]
-    requested_action: str
-    review_status: str = "VALIDATED"
-
-
-@dataclass(frozen=True)
-class ReviewSubmissionAck:
-    accepted_by_gate: bool
-    review_id: str
 
 
 @dataclass(frozen=True)
@@ -331,7 +264,8 @@ class ResultReceipt:
     run_id: str
     task_id: str
     candidate_version: int
-    review_id: str
+    submission_id: str
+    task_version: int
     result_ref: ArtifactRef
     status: str = "ACCEPTED"
 

@@ -1,4 +1,4 @@
-"""Collect measured requests, tool attempts and review decisions."""
+"""Collect model usage, tool attempts and task outcomes."""
 
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -8,7 +8,7 @@ from threading import RLock
 from time import perf_counter_ns
 from uuid import uuid4
 
-from rlm.supervised_rlm.schemas import AgentRole, ReviewDecision, TaskRecord
+from rlm.supervised_rlm.schemas import AgentRole, TaskRecord, TaskStatus
 from rlm.supervised_rlm.storage import serialize, write_json
 
 
@@ -18,6 +18,30 @@ class TokenUsage:
     output_tokens: int | None = None
     total_tokens: int | None = None
     source: str = "UNAVAILABLE"
+    reasoning_tokens: int | None = None
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
+
+    @classmethod
+    def from_provider(cls, usage: dict | None) -> "TokenUsage":
+        if usage is None:
+            return cls()
+        prompt = usage.get("prompt_tokens")
+        hit = usage.get("prompt_cache_hit_tokens")
+        if hit is None:
+            hit = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        if miss is None and prompt is not None and hit is not None:
+            miss = prompt - hit
+        return cls(
+            prompt,
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
+            "PROVIDER",
+            (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+            hit,
+            miss,
+        )
 
 
 @dataclass(frozen=True)
@@ -57,15 +81,7 @@ class CandidateEvent:
     submission_id: str
     status: str
     duration_ms: float
-
-
-@dataclass(frozen=True)
-class ReviewEvent:
-    task_id: str
-    candidate_version: int
-    review_id: str
-    decision: ReviewDecision
-    duration_ms: float
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +91,11 @@ class RoleMetricsSnapshot:
     input_tokens: int | None
     output_tokens: int | None
     token_usage_coverage: float | None
+    reasoning_tokens: int | None
+    prompt_cache_hit_tokens: int | None
+    prompt_cache_miss_tokens: int | None
+    length_finishes: int
+    step_limits_reached: int
     llm_duration_ms: float
     agent_duration_ms: float
 
@@ -89,6 +110,11 @@ class RunMetricsSnapshot:
     input_tokens: int | None
     output_tokens: int | None
     token_usage_coverage: float | None
+    reasoning_tokens: int | None
+    prompt_cache_hit_tokens: int | None
+    prompt_cache_miss_tokens: int | None
+    length_finishes: int
+    step_limits_reached: int
     tool_calls: int
     tool_protocol_valid: int
     tool_arguments_valid: int
@@ -98,14 +124,10 @@ class RunMetricsSnapshot:
     tool_semantic_correct: int
     candidates_submitted: int
     candidates_aborted: int
-    candidates_rejected: int
+    candidates_invalid: int
     candidates_accepted: int
-    plan_issues: int
-    review_incomplete: int
-    repair_attempts: int
-    repaired_tasks_accepted: int
-    repair_success_rate: float | None
     completed_tasks: int
+    failed_tasks: int
     total_tasks: int
     roles: dict[str, RoleMetricsSnapshot]
 
@@ -123,8 +145,7 @@ class MetricsCollector:
         self.llm: list[LLMCallRecord] = []
         self.tools: list[ToolCallRecord] = []
         self.candidates: dict[tuple[str, int, str], CandidateEvent] = {}
-        self.reviews: dict[str, ReviewEvent] = {}
-        self.repairs: set[tuple[str, str]] = set()
+        self.step_limits: Counter[AgentRole] = Counter()
         self.accepted: set[tuple[str, int]] = set()
         self.phase_times: Counter = Counter()
         self.seen: set[str] = set()
@@ -169,28 +190,13 @@ class MetricsCollector:
                 self.event("candidate", record)
                 self.candidates[key] = record
 
-    def record_review(self, record: ReviewEvent) -> None:
-        with self.lock:
-            if record.review_id not in self.reviews:
-                self.event("review", record, record.review_id)
-                self.reviews[record.review_id] = record
-
     def record_task_state(self, record: TaskRecord) -> None:
         self.event("task_state", record)
 
-    def record_repair(self, task_id: str, review_id: str, candidate_version: int) -> None:
+    def record_step_limit(self, role: AgentRole, task_id: str) -> None:
         with self.lock:
-            key = (task_id, review_id)
-            if key not in self.repairs:
-                self.event(
-                    "repair_started",
-                    {
-                        "task_id": task_id,
-                        "review_id": review_id,
-                        "rejected_version": candidate_version,
-                    },
-                )
-                self.repairs.add(key)
+            self.step_limits[role] += 1
+            self.event("step_budget_exhausted", {"role": role, "task_id": task_id})
 
     def record_acceptance(self, task_id: str, candidate_version: int) -> None:
         with self.lock:
@@ -204,13 +210,14 @@ class MetricsCollector:
                 "agent_phase_finished", {"role": role, "task_id": task_id, "duration_ms": duration}
             )
 
-    def role_summary(self, calls: list[LLMCallRecord], duration: float = 0) -> RoleMetricsSnapshot:
-        known_input = [
-            call.usage.input_tokens for call in calls if call.usage.input_tokens is not None
-        ]
-        known_output = [
-            call.usage.output_tokens for call in calls if call.usage.output_tokens is not None
-        ]
+    def role_summary(
+        self, calls: list[LLMCallRecord], duration: float = 0, step_limits: int = 0
+    ) -> RoleMetricsSnapshot:
+        def measured_total(field: str) -> int | None:
+            values = [getattr(call.usage, field) for call in calls]
+            known = [value for value in values if value is not None]
+            return sum(known) if known else None
+
         measured = sum(
             call.usage.input_tokens is not None and call.usage.output_tokens is not None
             for call in calls
@@ -218,9 +225,14 @@ class MetricsCollector:
         return RoleMetricsSnapshot(
             len(calls),
             sum(not call.success for call in calls),
-            sum(known_input) if known_input else None,
-            sum(known_output) if known_output else None,
+            measured_total("input_tokens"),
+            measured_total("output_tokens"),
             measured / len(calls) if calls else None,
+            measured_total("reasoning_tokens"),
+            measured_total("prompt_cache_hit_tokens"),
+            measured_total("prompt_cache_miss_tokens"),
+            sum(call.finish_reason == "length" for call in calls),
+            step_limits,
             sum(call.duration_ms for call in calls),
             duration,
         )
@@ -228,7 +240,9 @@ class MetricsCollector:
     def get_role_metrics(self, role: AgentRole) -> RoleMetricsSnapshot:
         with self.lock:
             return self.role_summary(
-                [item for item in self.llm if item.agent_role == role], self.phase_times[role]
+                [item for item in self.llm if item.agent_role == role],
+                self.phase_times[role],
+                self.step_limits[role],
             )
 
     def get_task_metrics(self, task_id: str) -> dict:
@@ -249,15 +263,8 @@ class MetricsCollector:
 
     def get_run_metrics(self, status: str, records: list[TaskRecord]) -> RunMetricsSnapshot:
         with self.lock:
-            usage = self.role_summary(self.llm)
-            decisions = Counter(review.decision for review in self.reviews.values())
+            usage = self.role_summary(self.llm, step_limits=sum(self.step_limits.values()))
             candidates = Counter(item.status for item in self.candidates.values())
-            revised = {
-                review.task_id
-                for review in self.reviews.values()
-                if review.decision == ReviewDecision.REVISE
-            }
-            repaired = revised & {task_id for task_id, _ in self.accepted}
             semantic = [
                 item.semantic_correct for item in self.tools if item.semantic_correct is not None
             ]
@@ -270,6 +277,11 @@ class MetricsCollector:
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.token_usage_coverage,
+                usage.reasoning_tokens,
+                usage.prompt_cache_hit_tokens,
+                usage.prompt_cache_miss_tokens,
+                usage.length_finishes,
+                usage.step_limits_reached,
                 len(self.tools),
                 sum(item.protocol_valid for item in self.tools),
                 sum(item.arguments_valid for item in self.tools),
@@ -279,14 +291,10 @@ class MetricsCollector:
                 sum(semantic),
                 candidates["SUBMITTED"],
                 candidates["ABORTED"],
-                decisions[ReviewDecision.REVISE],
+                candidates["INVALID"],
                 len(self.accepted),
-                decisions[ReviewDecision.PLAN_ISSUE],
-                decisions[ReviewDecision.REVIEW_INCOMPLETE],
-                len(self.repairs),
-                len(repaired),
-                len(repaired) / len(revised) if revised and self.finished_ms is not None else None,
                 sum(record.is_accepted() for record in records),
+                sum(record.status == TaskStatus.FAILED for record in records),
                 len(records),
                 {role: self.get_role_metrics(role) for role in AgentRole},
             )
@@ -315,6 +323,20 @@ class MetricsCollector:
             if snapshot.tool_executed
             else None
         )
-        verdicts = snapshot.candidates_rejected + snapshot.candidates_accepted
-        values["rejection_rate"] = snapshot.candidates_rejected / verdicts if verdicts else None
+        checked = snapshot.candidates_submitted + snapshot.candidates_invalid
+        values["candidate_submission_attempts"] = checked + snapshot.candidates_aborted
+        values["output_format_compliance_rate"] = (
+            snapshot.candidates_submitted / checked if checked else None
+        )
+        # The historical OOLONG summarizer reads these keys from metrics.json.
+        values.update(
+            candidates_rejected=0,
+            plan_issues=0,
+            review_incomplete=0,
+            repair_attempts=0,
+            repaired_tasks_accepted=0,
+            repair_success_rate=None,
+            rejection_rate=None,
+        )
+        values["roles"]["SUPERVISOR"] = asdict(self.role_summary([]))
         write_json(path, values)

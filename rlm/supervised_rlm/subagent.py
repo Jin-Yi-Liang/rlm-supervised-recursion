@@ -1,4 +1,4 @@
-"""Dispatch registered tasks and continue rejected candidates in the original session."""
+"""Dispatch registered tasks with persistent Child sessions."""
 
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter_ns
@@ -7,26 +7,19 @@ from rlm.supervised_rlm import prompts
 from rlm.supervised_rlm.client import AgentLoop
 from rlm.supervised_rlm.plan_manager import PlanManager
 from rlm.supervised_rlm.repl import REPLRuntime
-from rlm.supervised_rlm.review_gate import ReviewGate
 from rlm.supervised_rlm.schemas import (
     AgentRole,
     ContractError,
-    ReviewDecision,
     TaskDispatchOutcome,
     TaskSpec,
     TaskStatus,
 )
-from rlm.supervised_rlm.state_broker import StateBroker
-from rlm.supervised_rlm.storage import serialize
 from rlm.supervised_rlm.submission import SubmissionRegistry
-from rlm.supervised_rlm.supervisor import SupervisorAgent
 
 
 class SubAgentDispatcher:
-    def __init__(self, loop: AgentLoop, plan: PlanManager, gate: ReviewGate):
-        self.loop, self.plan, self.gate = loop, plan, gate
-        self.registry = SubmissionRegistry(loop.folder, plan.artifacts, loop.metrics)
-        self.supervisor = SupervisorAgent(loop, gate)
+    def __init__(self, loop: AgentLoop, plan: PlanManager, submissions: SubmissionRegistry):
+        self.loop, self.plan, self.submissions = loop, plan, submissions
 
     def transition(self, task_id: str, status: TaskStatus, **changes):
         record = self.plan.transition(task_id, status, **changes)
@@ -41,7 +34,7 @@ class SubAgentDispatcher:
             record = self.plan.records[task_id]
             if record.is_accepted():
                 return TaskDispatchOutcome(
-                    task_id, record.status, self.gate.get_receipt(task_id), None
+                    task_id, record.status, self.submissions.get_receipt(task_id), None
                 )
             if record.status != TaskStatus.PLANNED:
                 return TaskDispatchOutcome(
@@ -54,18 +47,10 @@ class SubAgentDispatcher:
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             status = self.plan.records[task_id].status
-            if status == TaskStatus.SUBMITTED:
-                self.transition(task_id, TaskStatus.REVIEWING)
-                status = TaskStatus.REVIEWING
-            if status == TaskStatus.REVIEWING:
-                status = TaskStatus.REVIEW_INCOMPLETE
-                self.transition(task_id, status, last_error=message)
-            elif status in (TaskStatus.RUNNING, TaskStatus.REPAIRING):
-                status = TaskStatus.FAILED
-                self.transition(task_id, status, last_error=message)
-            else:
+            if status not in (TaskStatus.RUNNING, TaskStatus.SUBMITTED):
                 raise
-            return TaskDispatchOutcome(task_id, status, None, message)
+            self.transition(task_id, TaskStatus.FAILED, last_error=message)
+            return TaskDispatchOutcome(task_id, TaskStatus.FAILED, None, message)
 
     def dispatch_batch(self, task_ids: list[str]) -> list[TaskDispatchOutcome]:
         if not isinstance(task_ids, list) or any(not isinstance(task, str) for task in task_ids):
@@ -119,7 +104,7 @@ class SubAgentDispatcher:
             nonlocal pending
             if pending is not None:
                 raise ContractError("INVALID_ARGUMENT", "Only one submission per cell")
-            pending = self.registry.prepare_submission(
+            pending = self.submissions.prepare_submission(
                 version + 1, result_var, evidence_vars, summary
             )
             return pending.ack
@@ -130,18 +115,14 @@ class SubAgentDispatcher:
             if not intent:
                 return None, ""
             if not result.success:
-                self.registry.abort_submission(task_id, intent)
+                self.submissions.record_submission(task_id, intent, "ABORTED", result.error_message)
                 return None, "Submission aborted because the Python cell failed."
             try:
-                return self.registry.finalize_submission(
-                    task, intent, namespace, tuple(session.history)
-                ), ""
+                return self.submissions.finalize_submission(task, intent, namespace), ""
             except ContractError as error:
-                self.registry.abort_submission(task_id, intent)
+                self.submissions.record_submission(task_id, intent, "INVALID", str(error))
                 return None, str(error)
 
-        revisions = 0
-        repair = None
         try:
             with REPLRuntime(
                 session.role,
@@ -152,60 +133,18 @@ class SubAgentDispatcher:
                 self.loop.config.execution_timeout,
                 max_tool_calls=self.loop.config.max_cell_tool_calls,
             ) as repl:
+                session.candidate_version = version + 1
                 for step in range(1, self.loop.config.max_child_steps + 1):
-                    if repair is not None:
-                        self.loop.time_left()
-                        self.transition(task_id, TaskStatus.RUNNING)
-                        self.loop.metrics.record_repair(
-                            task_id, repair.review_id, repair.candidate_version
-                        )
-                        repair = None
-                    session.candidate_version = version + 1
-                    candidate = self.loop.turn(
-                        session, repl, step, lambda: pending is not None, finish_cell
+                    receipt = self.loop.turn(
+                        session, repl, step, lambda: pending.names if pending else (), finish_cell
                     )
-                    if not candidate:
-                        self.loop.message(
-                            session,
-                            "user",
-                            "No candidate is under review. Use the actual context and submit a "
-                            'variable name, for example submit_candidate("result"), in a complete repl block.',
-                        )
-                        continue
-                    version = candidate.manifest.candidate_version
-                    self.transition(task_id, TaskStatus.SUBMITTED, candidate_version=version)
-                    self.transition(task_id, TaskStatus.REVIEWING)
-                    broker = StateBroker(self.plan.artifacts, self.plan, candidate)
-                    verdict = self.supervisor.review(broker)
-                    if verdict.decision == ReviewDecision.ACCEPT:
-                        receipt = self.gate.commit_accepted_candidate(candidate, verdict)
+                    if receipt is not None:
                         return TaskDispatchOutcome(task_id, TaskStatus.ACCEPTED, receipt, None)
-                    detail = f"{verdict.finding} {verdict.requested_action}".strip()
-                    if verdict.decision != ReviewDecision.REVISE:
-                        status = TaskStatus(verdict.decision)
-                        self.transition(
-                            task_id, status, latest_review_id=verdict.review_id, last_error=detail
-                        )
-                        return TaskDispatchOutcome(task_id, status, None, detail)
-                    self.transition(
-                        task_id,
-                        TaskStatus.REPAIRING,
-                        latest_review_id=verdict.review_id,
-                        last_error=detail,
-                    )
-                    if revisions >= self.loop.config.max_revisions:
-                        break
-                    revisions += 1
-                    repair = verdict
-                    self.loop.message(
-                        session,
-                        "user",
-                        "Repair in this same REPL using the review: " + serialize(verdict),
-                    )
-            detail = "Child step or candidate revision budget exhausted"
+            detail = "Child step budget exhausted"
+            self.loop.metrics.record_step_limit(session.role, task_id)
             self.transition(task_id, TaskStatus.FAILED, last_error=detail)
             return TaskDispatchOutcome(task_id, TaskStatus.FAILED, None, detail)
         finally:
             if pending:
-                self.registry.abort_submission(task_id, pending)
+                self.submissions.record_submission(task_id, pending, "ABORTED")
             self.loop.metrics.record_phase(session.role, task_id, started)

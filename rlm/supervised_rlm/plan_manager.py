@@ -36,13 +36,8 @@ OUTPUT_TYPES = {
 TRANSITIONS = {
     TaskStatus.PLANNED: {TaskStatus.RUNNING, TaskStatus.CANCELLED},
     TaskStatus.RUNNING: {TaskStatus.SUBMITTED, TaskStatus.FAILED},
-    TaskStatus.SUBMITTED: {TaskStatus.REVIEWING},
-    TaskStatus.REVIEWING: {
-        TaskStatus.REPAIRING,
-        TaskStatus.PLAN_ISSUE,
-        TaskStatus.REVIEW_INCOMPLETE,
-    },
-    TaskStatus.REPAIRING: {TaskStatus.RUNNING, TaskStatus.FAILED},
+    # Successful submissions are published by SubmissionRegistry with their receipt.
+    TaskStatus.SUBMITTED: {TaskStatus.FAILED},
 }
 
 
@@ -324,9 +319,7 @@ class PlanManager:
     def check_plan_change(self, record: TaskRecord) -> None:
         if record.status in {
             TaskStatus.RUNNING,
-            TaskStatus.REPAIRING,
             TaskStatus.SUBMITTED,
-            TaskStatus.REVIEWING,
         }:
             raise ContractError("TASK_BUSY", "Cannot change an active task")
 
@@ -369,9 +362,7 @@ class PlanManager:
             if record.status
             in {
                 TaskStatus.RUNNING,
-                TaskStatus.REPAIRING,
                 TaskStatus.SUBMITTED,
-                TaskStatus.REVIEWING,
             }
         ]
         errors = []

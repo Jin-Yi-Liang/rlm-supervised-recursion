@@ -41,8 +41,6 @@ We now also include a [verifiers](https://github.com/PrimeIntellect-ai/verifiers
 
 ## Quick Setup
 
-For the opt-in supervised recursion experiment and its ordered OOLONG-Pairs 32K runs, see
-[Supervised OOLONG-Pairs pilot](docs/supervised-oolong.md).
 > [!NOTE]
 > `rlms` requires **Python 3.11 or later**.
 
@@ -132,16 +130,15 @@ export PRIME_API_KEY=...
 ### Model Providers
 We currently support most major clients (OpenAI, Anthropic), as well as the router platforms (OpenRouter, Portkey). For local models, we recommend using vLLM (which interfaces with the [OpenAI client](https://github.com/alexzhang13/rlm/blob/main/rlm/clients/openai.py)). To view or add support for more clients, start by looking at [`rlm/clients/`](https://github.com/alexzhang13/rlm/tree/main/rlm/clients).
 
-## Supervised recursive RLM
+## Planning-Only RLM
 
-The opt-in `rlm.supervised_rlm` runtime implements a versioned plan, private Child REPLs,
-and independent Supervisor REPLs that inspect frozen evidence before a result can be accepted.
-Root sees accepted receipts and reads result values on demand. A rejected Child candidate can
-be repaired in the same REPL and conversation. Existing `RLM.completion` callers use the
-standard RLM path.
+The opt-in `rlm.supervised_rlm.SessionRuntime` uses a versioned plan and private, persistent
+Child REPLs. Root and Child use thinking mode. The runtime validates Child submissions against
+the declared schema, stores their results and returns receipts for Root to aggregate.
+Existing `RLM.completion` callers continue to use the standard RLM path.
 
-See [Supervised RLM v1](docs/supervised-rlm-v1.md) for the runtime API, local model smoke test,
-execution environment, and experiment artifacts.
+See the [Planning-Only RLM development report](docs/planning-only-rlm.md) for the runtime API,
+validation results and the OOLONG-Pairs 32K Case 12 command.
 
 ## Training
 We provide a simple RL training harness for training RLMs used in this repo (specifically the `local` REPL). The implementation uses no sandboxes for simplicity and slots easily your use case, but an ideal setup would use sandboxes for safety. Training logic is isolated to the [`training/`](https://github.com/alexzhang13/rlm/tree/main/training) folder, which exposes `rlm.RLM` as a [`verifiers`](https://github.com/willccbb/verifiers) `Environment` and plugs straight into [`prime-rl`](https://github.com/PrimeIntellect-ai/prime-rl). See the [training README](https://github.com/alexzhang13/rlm/tree/main/training#readme) for the launch command. The harness uses subprocess-isolated local REPL execution (no cloud sandboxes), matching the `local` environment above.

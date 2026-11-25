@@ -1,4 +1,4 @@
-"""Session entry point for the supervised RLM framework."""
+"""Session entry point for Planning-Only RLM."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +7,6 @@ from uuid import uuid4
 from rlm.supervised_rlm.client import AgentLoop, Backend
 from rlm.supervised_rlm.metrics import MetricsCollector
 from rlm.supervised_rlm.plan_manager import PlanManager
-from rlm.supervised_rlm.review_gate import ReviewGate
 from rlm.supervised_rlm.root_agent import RootAgent
 from rlm.supervised_rlm.schemas import (
     BudgetExhausted,
@@ -19,6 +18,7 @@ from rlm.supervised_rlm.schemas import (
 )
 from rlm.supervised_rlm.storage import ArtifactStore, text, write_json
 from rlm.supervised_rlm.subagent import SubAgentDispatcher
+from rlm.supervised_rlm.submission import SubmissionRegistry
 
 
 class SessionRuntime:
@@ -50,9 +50,9 @@ class SessionRuntime:
         )
         self.plan = PlanManager(self.global_task, self.folder, artifacts, config.max_tasks)
         self.loop = AgentLoop(self.folder, self.backend, config, self.metrics)
-        self.gate = ReviewGate(self.folder, self.plan, self.metrics)
-        self.dispatcher = SubAgentDispatcher(self.loop, self.plan, self.gate)
-        self.root = RootAgent(self.loop, self.plan, self.gate, self.dispatcher)
+        self.submissions = SubmissionRegistry(self.folder, self.plan, self.metrics)
+        self.dispatcher = SubAgentDispatcher(self.loop, self.plan, self.submissions)
+        self.root = RootAgent(self.loop, self.plan, self.submissions, self.dispatcher)
         self.handle = RunHandle(run_id)
         write_json(self.folder / "run.json", {"global_task": self.global_task, "config": config})
         return self.handle
@@ -80,7 +80,9 @@ class SessionRuntime:
             self.outcome = outcome
             write_json(self.folder / "outcome.json", outcome)
             write_json(self.folder / "task-ledger.json", self.plan.records)
-            write_json(self.folder / "accepted-receipts.json", self.gate.list_accepted_results())
+            write_json(
+                self.folder / "accepted-receipts.json", self.submissions.list_accepted_results()
+            )
             self.metrics.finish_run(outcome.status, self.root.active_records())
         return self.outcome
 

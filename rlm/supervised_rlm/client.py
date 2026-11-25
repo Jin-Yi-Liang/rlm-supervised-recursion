@@ -22,7 +22,7 @@ from rlm.supervised_rlm.metrics import (
 )
 from rlm.supervised_rlm.repl import REPLRuntime
 from rlm.supervised_rlm.schemas import AgentRole, BudgetExhausted, RunConfig, TraceRecord
-from rlm.supervised_rlm.storage import serialize, write_json
+from rlm.supervised_rlm.storage import serialize, write_json, write_text
 from rlm.utils.parsing import find_code_blocks
 
 Message = dict[str, str]
@@ -78,6 +78,9 @@ class QwenClient:
         response.raise_for_status()
         return response.json()["count"]
 
+    def generation_options(self, thinking: bool) -> dict:
+        return {"chat_template_kwargs": {"enable_thinking": thinking}, "top_k": 20}
+
     def complete(
         self,
         messages: list[Message],
@@ -85,6 +88,7 @@ class QwenClient:
         timeout: float,
         request_dir: Path,
     ) -> ModelReply:
+        options = self.generation_options(thinking)
         payload = {
             "model": self.model,
             "messages": messages,
@@ -92,29 +96,20 @@ class QwenClient:
             "temperature": 0.6,
             "top_p": 0.95,
             "presence_penalty": 0.0,
-            "chat_template_kwargs": {"enable_thinking": thinking},
-            "top_k": 20,
         }
-        write_json(request_dir / "request.json", payload)
+        write_json(request_dir / "request.json", payload | options)
         try:
             response = self.sdk.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.config.max_output_tokens,
-                temperature=0.6,
-                top_p=0.95,
-                presence_penalty=0.0,
-                timeout=timeout,
-                extra_body={"chat_template_kwargs": payload["chat_template_kwargs"], "top_k": 20},
+                **payload, timeout=timeout, extra_body=options
             )
         except Exception as error:
+            detail = str(error).replace(self.sdk.api_key, "[REDACTED]")
             write_json(
-                request_dir / "error.json", {"type": type(error).__name__, "message": str(error)}
+                request_dir / "error.json", {"type": type(error).__name__, "message": detail}
             )
-            raise
+            raise RuntimeError(f"{type(error).__name__}: {detail}") from None
         raw = response.model_dump()
         write_json(request_dir / "response.json", raw)
-        usage = response.usage
         choice = response.choices[0]
         content = choice.message.content or ""
         reasoning_present = bool(
@@ -128,9 +123,7 @@ class QwenClient:
             reasoning_present, content = True, ""
         return ModelReply(
             content.strip(),
-            TokenUsage(usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, "PROVIDER")
-            if usage
-            else TokenUsage(),
+            TokenUsage.from_provider(raw.get("usage")),
             choice.finish_reason,
             reasoning_present,
         )
@@ -188,7 +181,7 @@ class AgentLoop:
 
     def call(self, session: AgentSession) -> ModelReply:
         self.time_left()
-        thinking = session.role != AgentRole.CHILD
+        thinking = True
         messages, count = self.window(session, thinking)
         reserved = count + self.config.max_output_tokens
         with self.budget_lock:
@@ -218,6 +211,7 @@ class AgentLoop:
         started = perf_counter_ns()
         try:
             result = self.backend.complete(messages, thinking, self.time_left(), location)
+            write_text(location / "model-output.txt", result.content)
             return result
         finally:
             usage = result.usage if result else TokenUsage()
@@ -288,7 +282,7 @@ class AgentLoop:
         session: AgentSession,
         repl: REPLRuntime,
         step: int,
-        pending_snapshot: Callable,
+        pending_variables: Callable,
         finish_cell: Callable,
     ) -> object:
         reply = self.call(session)
@@ -300,13 +294,17 @@ class AgentLoop:
         if not blocks:
             if "```" in reply.content:
                 self.tool_protocol(session, False, "INVALID_TOOL_PROTOCOL")
+            if reply.finish_reason == "length":
+                outputs.append(
+                    "The response reached the token limit without a complete REPL block."
+                )
             outputs.append("Use a fenced repl block with valid Python and the provided tools.")
         for code in blocks[:8]:
             execution_id = uuid4().hex
             started = perf_counter_ns()
             result = None
             try:
-                result, snapshot = repl.execute(code, execution_id, pending_snapshot)
+                result, snapshot = repl.execute(code, execution_id, pending_variables)
             finally:
                 self.metrics.record_tool_call(
                     ToolCallRecord(

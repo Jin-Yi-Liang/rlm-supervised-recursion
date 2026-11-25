@@ -148,7 +148,7 @@ class REPLRuntime:
                 valid, executed = False, False
             return ToolResponse(False, code=error.code, message=str(error))
         finally:
-            if name != "has_pending_candidate":
+            if name != "pending_submission_variables":
                 self.metrics.record_tool_call(
                     ToolCallRecord(
                         uuid4().hex,
@@ -168,7 +168,7 @@ class REPLRuntime:
     def execute(
         self, code: str, execution_id: str, pending: Callable
     ) -> tuple[ExecutionResult, list | None]:
-        tools = {**self.tools, "has_pending_candidate": pending}
+        tools = {**self.tools, "pending_submission_variables": pending}
         deadline = monotonic() + self.timeout
         self.send({"code": code, "execution_id": execution_id}, deadline)
         calls = 0
@@ -176,7 +176,7 @@ class REPLRuntime:
             packet = self.receive(deadline)
             if packet.get("kind") == "tool":
                 name = packet.get("tool")
-                if name != "has_pending_candidate":
+                if name != "pending_submission_variables":
                     calls += 1
                     if calls > self.max_tool_calls:
                         raise REPLError(

@@ -109,9 +109,6 @@ class View(dict):
     def is_accepted(self):
         return self.get("status") == "ACCEPTED"
 
-    def names(self):
-        return tuple(item["name"] for item in self["entries"])
-
 
 class BoundedOutput(io.StringIO):
     def write(self, value):
@@ -164,32 +161,20 @@ def import_module(name, globals=None, locals=None, fromlist=(), level=0):
     raise ImportError(f"Module {name!r} is unavailable in the restricted REPL")
 
 
-def freeze_namespace(namespace, protected):
+def freeze_submission(namespace, protected, names):
     values = []
     used = 0
-    for name, value in namespace.items():
-        if name in protected and name != "context":
+    for name in names:
+        if name not in namespace or (name in protected and name != "context"):
             continue
         try:
-            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
-            size = len(encoded)
+            encoded = json.dumps(namespace[name], ensure_ascii=False, allow_nan=False).encode()
         except (TypeError, ValueError, RecursionError):
-            values.append(
-                {
-                    "name": name,
-                    "type_name": type(value).__name__,
-                    "size_bytes": 0,
-                    "available": False,
-                }
-            )
+            values.append({"name": name, "available": False})
             continue
+        size = len(encoded)
         available = size <= 16 * 1024 * 1024 and used + size <= MAX_SNAPSHOT
-        entry = {
-            "name": name,
-            "type_name": type(value).__name__,
-            "size_bytes": size,
-            "available": available,
-        }
+        entry = {"name": name, "available": available}
         if available:
             entry["value"] = json.loads(encoded)
             used += size
@@ -218,9 +203,10 @@ def main():
         snapshot = None
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                exec(compile(message["code"], "<supervised-repl>", "exec"), namespace)
-                if proxy("has_pending_candidate")():
-                    snapshot = freeze_namespace(namespace, protected)
+                exec(compile(message["code"], "<planning-repl>", "exec"), namespace)
+                names = proxy("pending_submission_variables")()
+                if names:
+                    snapshot = freeze_submission(namespace, protected, names)
         except BaseException as error:
             error_type, error_message = type(error).__name__, str(error)[:4096]
         finally:

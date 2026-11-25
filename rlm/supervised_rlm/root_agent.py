@@ -7,10 +7,10 @@ from rlm.supervised_rlm import prompts
 from rlm.supervised_rlm.client import AgentLoop
 from rlm.supervised_rlm.plan_manager import PlanManager
 from rlm.supervised_rlm.repl import REPLRuntime
-from rlm.supervised_rlm.review_gate import ReviewGate
 from rlm.supervised_rlm.schemas import AgentRole, ContractError, RunOutcome, ValidationReport
 from rlm.supervised_rlm.storage import serialize, text
 from rlm.supervised_rlm.subagent import SubAgentDispatcher
+from rlm.supervised_rlm.submission import SubmissionRegistry
 
 
 class RootAgent:
@@ -18,10 +18,15 @@ class RootAgent:
         self,
         loop: AgentLoop,
         plan: PlanManager,
-        gate: ReviewGate,
+        submissions: SubmissionRegistry,
         dispatcher: SubAgentDispatcher,
     ):
-        self.loop, self.plan, self.gate, self.dispatcher = loop, plan, gate, dispatcher
+        self.loop, self.plan, self.submissions, self.dispatcher = (
+            loop,
+            plan,
+            submissions,
+            dispatcher,
+        )
         self.task = plan.task
 
     def store_input(self, value: object, name: str = "input") -> str:
@@ -66,14 +71,14 @@ class RootAgent:
         if not report.valid:
             return report
         for task_id in self.plan.state().completed_task_ids:
-            receipt = self.gate.get_receipt(task_id)
+            receipt = self.submissions.get_receipt(task_id)
             record = self.plan.records[task_id]
             if (
                 receipt is None
                 or receipt.run_id != self.task.run_id
                 or receipt.result_ref.task_id != task_id
                 or receipt.candidate_version != record.candidate_version
-                or receipt.review_id != record.latest_review_id
+                or receipt.task_version != record.task_version
             ):
                 return ValidationReport(False, (f"Invalid result receipt for {task_id}",))
         return report
@@ -122,7 +127,7 @@ class RootAgent:
                     "plan_version": current.plan_version,
                     "accepted": [
                         {"task_id": receipt.task_id, "receipt_id": receipt.receipt_id}
-                        for receipt in self.gate.list_accepted_results()
+                        for receipt in self.submissions.list_accepted_results()
                     ],
                     "pending_task_ids": current.pending_task_ids,
                     "open_issues": current.open_issues,
@@ -161,8 +166,8 @@ class RootAgent:
             "store_final": self.store_final,
             "rlm_query": self.dispatcher.rlm_query,
             "rlm_query_batched": self.dispatcher.dispatch_batch,
-            "list_accepted_results": self.gate.list_accepted_results,
-            "read_accepted_result": self.gate.read_accepted_result,
+            "list_accepted_results": self.submissions.list_accepted_results,
+            "read_accepted_result": self.submissions.read_accepted_result,
             "validate_plan_completion": self.validate_plan_completion,
             "get_run_metrics": lambda: self.loop.metrics.get_run_metrics(
                 "RUNNING", self.active_records()
@@ -199,6 +204,7 @@ class RootAgent:
                     outcome = self.loop.turn(session, repl, step, lambda: False, finish_cell)
                     if outcome:
                         return outcome
+            self.loop.metrics.record_step_limit(session.role, session.task_id)
             return RunOutcome(self.task.run_id, "INCOMPLETE", reason="Root step budget exhausted")
         finally:
             self.loop.metrics.record_phase(session.role, session.task_id, started)
